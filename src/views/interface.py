@@ -10,6 +10,7 @@ from src.models.materiais import Concreto, Aco
 from src.models.elementos import VigaRetangular, VigaT
 from src.controllers.flexao import calcular_flexao, calcular_momento_limite_armadura_simples, calcular_viga_t
 from src.controllers.detalhamento import detalhar_arranjo, AGREGADOS
+from src.controllers.ancoragem import calcular_fbd, calcular_comprimento_ancoragem
 from src.views.desenho_secao import gerar_grafico_secao
 
 def renderizar_tela():
@@ -129,6 +130,8 @@ def renderizar_tela():
         st.session_state["d_linha"] = d_linha
         st.session_state["d_max_agregado"] = d_max_agregado
         st.session_state["forma_secao"] = forma_secao
+        st.session_state["fck"] = fck_escolhido
+        st.session_state["fyd"] = aco.fyd
 
     if "resultado_calculo" in st.session_state:
         resultado = st.session_state["resultado_calculo"]
@@ -138,12 +141,14 @@ def renderizar_tela():
         d_lin = st.session_state["d_linha"]
         d_agreg = st.session_state["d_max_agregado"]
         forma = st.session_state["forma_secao"]
+        fck_val = st.session_state.get("fck", 25.0)
+        fyd_val = st.session_state.get("fyd", 434.78)
 
         if resultado.get("modo_inverso", False):
             st.success("Cálculo da capacidade máxima realizado com sucesso!")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Momento Máx. Resistente ($M_d$)", f"{resultado['md_limite_knm']:.2f} kN.m")
-            c2.metric(r"Linha Neutra Limite ($\beta_x$)", f"{resultado['beta_x']:.2f}")
+            c2.metric(r"Linha Neutra Limite ($eta_x$)", f"{resultado['beta_x']:.2f}")
             c3.metric("Braço de Alavanca ($z$)", f"{resultado['z_cm']:.2f} cm")
             c4.metric(r"Área de Aço ($A_s$)", f"{resultado['as_cm2']:.2f} cm²")
             as_alvo = resultado["as_cm2"]
@@ -153,7 +158,7 @@ def renderizar_tela():
             st.success("Dimensionamento concluído!")
             c1, c2, c3 = st.columns(3)
             c1.metric("Momento de Cálculo ($M_d$)", f"{resultado.get('md_knm', 0.0):.2f} kN.m")
-            c2.metric(r"Linha Neutra ($\beta_x$)", f"{resultado.get('beta_x', 0.0):.2f}")
+            c2.metric(r"Linha Neutra ($eta_x$)", f"{resultado.get('beta_x', 0.0):.2f}")
             c3.metric("Tipo de Armadura", resultado.get("tipo_armadura", "Simples"))
             
             # --- DEFINIÇÃO UNIVERSAL DAS VARIÁVEIS DE AÇO ---
@@ -235,6 +240,46 @@ def renderizar_tela():
             )
             arranjo_asl_selecionado = arranjos_as_linha[indice_asl_escolhido] if arranjos_as_linha else None
 
+        # --- MÓDULO DE ANCORAGEM (NBR 6118 / AULA 07) ---
+        if arranjo_as_selecionado:
+            st.markdown("---")
+            st.subheader("⚓ Ancoragem das Armaduras Longitudinais (NBR 6118)")
+            
+            tipo_bar = "nervurada" if "CA-50" in tipo_aco else "lisa"
+            # Situação de aderência para a armadura inferior: boa aderência se h <= 60 cm
+            pos_aderencia_inf = "boa" if viga_calc.h <= 60.0 else "boa"
+            
+            phi_inf = arranjo_as_selecionado["phi_mm"]
+            as_ef_inf = arranjo_as_selecionado["as_efetivo"]
+            
+            res_fbd_inf = calcular_fbd(fck=fck_val, fyk=fyk, tipo_barra=tipo_bar, 
+                                       posicao_aderencia=pos_aderencia_inf, phi_mm=phi_inf)
+            
+            # Ancoragem reta e com gancho para As
+            anc_reta_inf = calcular_comprimento_ancoragem(phi_mm=phi_inf, fyd_mpa=fyd_val, 
+                                                          fbd_mpa=res_fbd_inf["fbd"], 
+                                                          as_calc=as_alvo, as_ef=as_ef_inf, 
+                                                          com_gancho=False, comprimida=False)
+            
+            anc_gancho_inf = calcular_comprimento_ancoragem(phi_mm=phi_inf, fyd_mpa=fyd_val, 
+                                                            fbd_mpa=res_fbd_inf["fbd"], 
+                                                            as_calc=as_alvo, as_ef=as_ef_inf, 
+                                                            com_gancho=True, comprimida=False)
+
+            col_anc1, col_anc2, col_anc3, col_anc4 = st.columns(4)
+            col_anc1.metric(r"Resistência de Aderência ($f_{bd}$)", f"{res_fbd_inf['fbd']:.2f} MPa")
+            col_anc2.metric(r"Comprimento Básico ($l_b$)", f"{anc_reta_inf['lb_cm']:.1f} cm")
+            col_anc3.metric(r"$l_{b,	ext{nec}}$ (Barra Reta)", f"{anc_reta_inf['lb_nec_cm']:.1f} cm")
+            col_anc4.metric(r"$l_{b,	ext{nec}}$ (Com Gancho 90°/135°)", f"{anc_gancho_inf['lb_nec_cm']:.1f} cm")
+
+            with st.expander("ℹ️ Ver detalhes normativos do cálculo de ancoragem"):
+                st.write(f"• **Resistência à tração direta do concreto ($f_{{ctd}}$):** `{res_fbd_inf['fctd']:.2f} MPa`")
+                st.write(f"• **Coeficientes de aderência:** $\\eta_1 = {res_fbd_inf['eta1']:.2f}$ (barra {tipo_bar}) | $\\eta_2 = {res_fbd_inf['eta2']:.2f}$ ({pos_aderencia_inf} aderência) | $\\eta_3 = {res_fbd_inf['eta3']:.2f}$")
+                st.write(f"• **Comprimento mínimo normativo ($l_{{b,\text{{mín}}}}$):** `{anc_reta_inf['lb_min_cm']:.1f} cm`")
+                st.write(f"• **Relação de aproveitamento ($A_{{s,\text{{calc}}}} / A_{{s,\text{{ef}}}}$):** `{anc_reta_inf['razao_as']:.3f}`")
+                st.caption("Nota: Em barras comprimidas (armadura dupla) a NBR 6118 veda o uso de ganchos devido à concentração de tensões e instabilidade.")
+
+        # --- VISTA GRÁFICA DA SEÇÃO TRANSVERSAL ---
         if arranjo_as_selecionado:
             st.markdown("---")
             st.subheader("📐 Vista Gráfica da Seção Transversal")
